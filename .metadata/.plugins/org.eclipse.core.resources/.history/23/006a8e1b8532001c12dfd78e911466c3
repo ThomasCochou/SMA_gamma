@@ -1,0 +1,308 @@
+/**
+* Name: Fipa_CNP_workers
+* Author: Pierre Chevaillier, ENIB
+* description: starting point for the lab wokr on multiagent systems
+*     implementing the Fipa Contract net protocol on a toy problem
+* revision: 21-oct-2021 pierre.chevaillier@enib.fr comments, code cleaning
+* Tags:  Education, master, SIIA, SMA
+* TODO add missing pieces of code for a full implementation of the protocol
+*/
+
+model Fipa_CNP_workers
+
+global torus: false {
+	int envSize const: true <- 1000;
+	geometry shape <- square(envSize);
+
+    int numberOfManagers <- 1; 	// more is better (only one until not fully tested)
+    int numberOfBidders <- 1;   // aka contractors. more is better (only one until not fully tested)
+    int nTaskTypes <- 3;
+    int nTaskBatch <- 1;
+	list<string> taskTypes <- []; // initialized within the 'init' block bellow
+	float dt <- 1.0;
+	
+    init {
+    	// Generation of the names of the types of task 
+		string taskName <- '';
+		loop i from: 0 to: nTaskTypes-1 {
+			taskName <- 'task' + string(i);
+			add taskName to: taskTypes; 
+		}
+    		
+		// Definition of the initial set of agents, with their state variables
+		create manager number: numberOfManagers {
+			// The tasks assigned to each manager (// here all the managers have the same tasks)
+			loop times: nTaskBatch {
+				tasks <- tasks + copy(taskTypes);
+			}
+			tasks <- shuffle(tasks); // more realistic but obviously less deterministic
+			write 'manager task' + tasks;
+			location <- { rnd(envSize - 2) + 1, rnd (envSize - 2) + 1 };
+    	}
+        
+		create bidder number: numberOfBidders {
+			// Definition of each agent's capability and its performance in doing it
+			// here: one of the tasks of the domain (defined by tasksTypes)
+			// the task the agent can perform is here randomly picked out from taskTypes
+			// warning: it is possible that no bidder is able to perform a given task type
+			int t <- rnd(length(taskTypes) -1);
+			speciality <- taskTypes[t];
+			performance <- 3 + rnd(nTaskTypes);
+		}
+	}
+}
+
+// The basic definition of the agents (features shared by managers and bidders)
+// here: agents architecture, skills and domain dependent features
+species name: worker skills: [fipa, moving] control: fsm {
+	int shade <- 0;
+	int size <- 10;
+	int sizeIncr <- 5;
+	float velocity <- 10.0;
+	list<int> stateColor <- [0,0,0];
+	
+	action grow {
+		size <- size + sizeIncr;
+	}
+	
+}
+
+species name: manager parent: worker { 
+	// agent's goals (=tasks to do); set when the agent is created
+	list<string> tasks;
+	
+	// State variables related to the CNP management
+	// agent's believes 
+	// TODO: additional variables are needed
+	bool hasSomethingToDo <- false;
+	bool taskIsDone <- false;
+	float biddingTime <- 0.0;
+	float actualTime <- 0.0;
+	bool interrestingBid <- false;
+	
+
+
+	aspect default {
+		draw circle(size) color: rgb(stateColor[0], stateColor[1], stateColor[2]);
+		if length(tasks) > 0 {
+			draw tasks[0] color: rgb(0, 0, 0) font: font('Default', 14, #bold);
+		}
+	}
+	
+	// ========================================================================
+	// State machine controlling the agents behavior
+	// TODO: complete this state machine (there are missing states and transitions)
+	state Idle initial: true {
+		enter {
+			stateColor <- [0,0,0];
+			write'(Time ' + time + '): ' + name + '  is now idle...';
+			if not empty(tasks) {
+				hasSomethingToDo <- true;
+			}
+		}
+		transition to: Demand when: hasSomethingToDo = true;
+		transition to: JobLess when: hasSomethingToDo = false;
+	}
+
+	state JobLess {
+		enter{
+			write'Terminate State';
+		}
+	}
+	
+	state Demand {
+		enter {
+			stateColor <- [256,0,0];
+			if length(tasks) > 0 {
+				write'(Time ' + time + '): ' + name + ' has something to ask (' + tasks[0] + ')...';
+			}
+		}
+		transition to: Idle when: empty(tasks);
+	} 
+	
+	
+	// ========================================================================	
+	
+	action acknowledge_task_done {
+		// TODO Update state variable(s) (the agent's believes)
+		
+    	remove index: 0 from: tasks; // the task is no more in the agent's goal stack
+    	write 'believes the task done';
+	}
+	
+
+	// ========================================================================	
+	// Contract Net Protocol management
+ 
+    // Message sending and incoming messages handling using reflexes
+	// TODO: add other reflexes and edit existing ones
+	  
+    reflex send_cfp_to_participants when: not empty(tasks) {
+        write '(time: ' + time + ') ' + name + ' sent a CFP to all the participants';
+        do start_conversation (to: list(bidder), protocol: 'fipa-contract-net', performative: 'cfp', contents: [tasks[0]]);
+        // TODO update state variable(s)
+        biddingTime <- time;
+        actualTime <- time;
+        loop while: actualTime - biddingTime > 3 {
+        	actualTime <- time;
+        }
+        biddingTime <- 0.0;
+        actualTime <- 0.0;
+    }
+
+	
+    reflex evaluate_bids when: not empty(proposes) {
+        bool chosen <- false;
+        message chosenBid;
+        loop name: bid over: proposes {
+            if (not chosen) {
+                chosenBid <- bid;
+                chosen <- true;
+            }
+        }
+        if (chosen) {
+            do accept_proposal (message: chosenBid, contents: ['']);
+        }
+    }
+    
+}
+
+species name: bidder parent: worker {
+	string speciality; 			// what the agent can do: its domain-specific skill (set when the agent is created)
+	int performance;   			// the amount of time the agent needs to perform the task (set when the agent is created)
+	
+	// State variables related to the CNP
+	// TODO: additional variables may be needed
+	float bidValue <- 0.0;
+	bool busy <- false;
+	agent demandingAgent;		// the agent keeps in mind who is the agent it is currently committed with
+	
+	// Domain specific state variables
+	point home <- {0,0};	  	// The agent's place when idle (set when the agent is created)
+	point targetLoc <- {0,0}; 	// Dynamically defined, depending on the agent's current goal 
+	float arrivalTime;
+	bool atDestination <- false update: (abs(location.x - targetLoc.x) < 0.01) and (abs(location.y - targetLoc.y) < 0.01);
+	
+	init {
+		home <- { rnd (envSize - 2) + 1, rnd (envSize -2) + 1 };
+		location <- home;
+	}
+
+	aspect default { 
+		draw circle(size) color: #blue ;	
+		draw speciality + " (" +  int(bidValue) + ") " + state color: rgb(255, 255-shade, shade) font: font('Default', 12, #bold);
+	}
+	
+	// ========================================================================
+	// State machine controlling the agents behavior
+
+	state Init initial: true {
+		transition to: AtOffice { }
+	}
+	
+	state AtOffice {
+		enter {
+			shade <- 64; // used for graphical presentation			
+		}
+		transition to: MoveToTarget when: busy { 
+			targetLoc <- demandingAgent.location;
+		}
+	}
+	
+	state MoveToTarget {
+		enter {
+			shade <- 255; // used for graphical presentation
+		}
+		do goto target: targetLoc speed: velocity; // action provided by the 'moving' skill
+		transition to: Work when: atDestination { 
+			arrivalTime <- time;
+		}
+	}
+	
+	state Work {
+		enter {
+			shade <- 128;
+			// Interaction between the two agents (the bidder is the initiator of the interaction)
+			ask demandingAgent as worker { do grow; }
+					
+		}
+		transition to: GoBackToOffice when: time > (arrivalTime + performance) { 
+			targetLoc <- home; 
+			do grow; 
+			// TODO the agent should inform the demanding agent that it has just completed the task
+			// TODO update the agent's state variable(s) related to the CNP
+			
+		}
+	}
+	
+	state GoBackToOffice {
+		enter { 
+			shade <- 0;
+			busy <- false;
+		}
+ 		do goto target: targetLoc speed: velocity;
+		transition to: AtOffice when: atDestination {
+		}
+	}
+	
+	// ========================================================================
+	// Contract Net Protocol management
+
+    // Handling incoming messages using reflexes
+	// TODO: for students complete this section	
+    reflex receive_cfp when: !empty(cfps) {
+		bool chosen <- false;
+		loop name: mess over: cfps {
+			write '(Time ' + time + '): ' + name + ' received a cfp from ' + agent(mess.sender).name;
+			list<string> contents <- mess.contents;
+			if contents[0] = speciality {
+				do propose : (message: mess, contents: [bidValue]);
+			}
+		}
+    }
+     
+}
+
+// Experiment suitable for 'unitary test' (1 iteration of the CNP in the simplest setting)
+experiment cnp1 type: gui {
+	// Define parameters of the experiments (refers to the attributes of the global agent)
+	// parameter "My parameter" category: "My parameters" var: one_global_attribute;
+	parameter 'Number of managers' category: 'Dimensions' var: numberOfManagers <- 1;
+	parameter 'Number of bidders' category: 'Dimensions' var: numberOfBidders <- 1;
+	parameter 'Number of task types' category: 'Dimensions' var: nTaskTypes <- 1;
+	parameter 'Number of task batch (managers)' category: 'Dimensions' var: nTaskBatch <- 1;
+	
+	float minimum_cycle_duration <- 0.05;
+	
+    output {
+		display ground background: rgb(200, 200, 200) {
+			species manager;
+			species bidder;
+		}
+    }
+}
+
+
+experiment large type: gui {
+
+	// Define parameters of the experiments (refers to the attributes of the global agent)
+	// parameter "My parameter" category: "My parameters" var: one_global_attribute;
+	parameter 'Number of managers' category: 'Dimensions' var: numberOfManagers <- 20;
+	parameter 'Number of bidders' category: 'Dimensions' var: numberOfBidders <- 20;
+	parameter 'Number of task types' category: 'Dimensions' var: nTaskTypes <- 3;
+	parameter 'Number of task batch (managers)' category: 'Dimensions' var: nTaskBatch <- 4;
+	
+	
+	// Define attributes, actions, a init section and behaviors if necessary
+	float minimum_cycle_duration <- 0.05;
+	
+	output {
+		// Define inspectors, browsers and displays here	
+		display ground background: rgb(200, 200, 200) {
+			species manager;
+			species bidder;
+		}
+    }
+
+}
+

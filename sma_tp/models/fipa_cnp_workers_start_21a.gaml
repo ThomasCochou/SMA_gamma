@@ -76,6 +76,11 @@ species name: manager parent: worker {
 	// TODO: additional variables are needed
 	bool hasSomethingToDo <- false;
 	bool taskIsDone <- false;
+	float biddingTime <- 0.0;
+	float actualTime <- 0.0;
+	bool interrestingBid <- false;
+	
+
 
 	aspect default {
 		draw circle(size) color: rgb(stateColor[0], stateColor[1], stateColor[2]);
@@ -91,10 +96,19 @@ species name: manager parent: worker {
 		enter {
 			stateColor <- [0,0,0];
 			write'(Time ' + time + '): ' + name + '  is now idle...';
+			if not empty(tasks) {
+				hasSomethingToDo <- true;
+			}
 		}
-		transition to: Demand when: not empty(tasks);
+		transition to: Demand when: hasSomethingToDo = true;
+		transition to: JobLess when: hasSomethingToDo = false;
 	}
 
+	state JobLess {
+		enter{
+			write'Terminate State';
+		}
+	}
 	
 	state Demand {
 		enter {
@@ -127,14 +141,29 @@ species name: manager parent: worker {
         write '(time: ' + time + ') ' + name + ' sent a CFP to all the participants';
         do start_conversation (to: list(bidder), protocol: 'fipa-contract-net', performative: 'cfp', contents: [tasks[0]]);
         // TODO update state variable(s)
+        biddingTime <- time;
+        actualTime <- time;
+        loop while: actualTime - biddingTime > 3 {
+        	actualTime <- time;
+        }
+        biddingTime <- 0.0;
+        actualTime <- 0.0;
     }
 
-	/*
-    reflex evaluate_bids when:  {
-		loop name: bid over: proposes {
-		}
+	
+    reflex evaluate_bids when: not empty(proposes) {
+        bool chosen <- false;
+        message chosenBid;
+        loop name: bid over: proposes {
+            if (not chosen) {
+                chosenBid <- bid;
+                chosen <- true;
+            }
+        }
+        if (chosen) {
+            do accept_proposal (message: chosenBid, contents: ['']);
+        }
     }
-	 */
     
 }
 
@@ -147,6 +176,7 @@ species name: bidder parent: worker {
 	float bidValue <- 0.0;
 	bool busy <- false;
 	agent demandingAgent;		// the agent keeps in mind who is the agent it is currently committed with
+	bool isWaitingForBids <- false;
 	
 	// Domain specific state variables
 	point home <- {0,0};	  	// The agent's place when idle (set when the agent is created)
@@ -202,6 +232,7 @@ species name: bidder parent: worker {
 			do grow; 
 			// TODO the agent should inform the demanding agent that it has just completed the task
 			// TODO update the agent's state variable(s) related to the CNP
+			
 		}
 	}
 	
@@ -220,11 +251,20 @@ species name: bidder parent: worker {
 
     // Handling incoming messages using reflexes
 	// TODO: for students complete this section	
-    reflex receive_cfp when: !empty(cfps) {
-		//bool chosen <- false;
+    reflex receive_cfp when: !empty(cfps) and not isWaitingForBids{
+		bool chosen <- false;
 		loop name: mess over: cfps {
 			write '(Time ' + time + '): ' + name + ' received a cfp from ' + agent(mess.sender).name;
 			list<string> contents <- mess.contents;
+			if (not chosen and contents[0] = speciality) {
+				bidValue <- time + performance;
+				do propose (message: mess, contents: [bidValue]);
+				chosen <- true;
+			}
+		}
+		if(chosen){
+			isWaitingForBids <- true;
+			
 		}
     }
      
